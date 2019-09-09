@@ -1,22 +1,32 @@
-import re
+import copy
 import json
-from tqdm import tqdm, trange
 import pdb
 import random
-from collections import namedtuple
-import numpy as np
-import copy
-import torch
+import re
 import traceback
-from torch.optim import Adam
-from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
-from pytorch_pretrained_bert.tokenization import whitespace_tokenize, BasicTokenizer, BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
-from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
-from pytorch_pretrained_bert.optimization import BertAdam
-from model import BertForMultiHopQuestionAnswering, CognitiveGNN
-from utils import warmup_linear, find_start_end_after_tokenized, find_start_end_before_tokenized, bundle_part_to_batch, judge_question_type, fuzzy_retrieve, WindowMean, fuzz
+from collections import namedtuple
+from itertools import product
+
+import fire
+import numpy as np
+import torch
+import torch.multiprocessing as mp
 from data import convert_question_to_samples_bundle, homebrew_data_loader
+from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
+from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
+from pytorch_pretrained_bert.optimization import BertAdam
+from pytorch_pretrained_bert.tokenization import (BasicTokenizer,
+                                                  BertTokenizer,
+                                                  whitespace_tokenize)
+from torch.optim import Adam
+from torch.utils.data import RandomSampler, SequentialSampler, TensorDataset
+from tqdm import tqdm, trange
+
+from model import BertForMultiHopQuestionAnswering, CognitiveGNN
+from utils import (WindowMean, bundle_part_to_batch,
+                   find_start_end_after_tokenized,
+                   find_start_end_before_tokenized, fuzz, fuzzy_retrieve,
+                   judge_question_type, warmup_linear)
 
 
 def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient_accumulation_steps, lr1, lr2, alpha):
@@ -53,7 +63,10 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
     num_batch, dataloader = homebrew_data_loader(bundles, mode = mode, batch_size=batch_size)
     num_steps = num_batch * num_epoch
     global_step = 0
-    opt1 = BertAdam(optimizer_grouped_parameters, lr = lr1, warmup = 0.1, t_total=num_steps)
+    if mode == 'bundle':
+        opt1 = BertAdam(optimizer_grouped_parameters, lr = lr1, t_total=num_steps)
+    else:
+        opt1 = BertAdam(optimizer_grouped_parameters, lr = lr1, warmup = 0.1, t_total=num_steps)
     model1.to(device)
     model1.train()
 
@@ -121,7 +134,7 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
     return (model1, model2)
 
 
-def main(output_model_file = './models/bert-base-uncased.bin', load = False, mode = 'tensors', batch_size = 12, 
+def main(output_model_file = './models/bert-base-uncased.bin', load = False, mode = 'tensors', batch_size = 20, 
             num_epoch = 1, gradient_accumulation_steps = 1, lr1 = 1e-4, lr2 = 1e-4, alpha = 0.2):
     
     BERT_MODEL = 'bert-base-uncased' # bert-large is too large for ordinary GPU on task #2
@@ -160,6 +173,5 @@ def main(output_model_file = './models/bert-base-uncased.bin', load = False, mod
     saved_dict['params2'] = model2.state_dict()
     torch.save(saved_dict, output_model_file)
 
-import fire
 if __name__ == "__main__":
     fire.Fire(main)
