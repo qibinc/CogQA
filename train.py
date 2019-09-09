@@ -1,3 +1,4 @@
+import argparse
 import copy
 import json
 import pdb
@@ -7,7 +8,6 @@ import traceback
 from collections import namedtuple
 from itertools import product
 
-import fire
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -18,6 +18,7 @@ from pytorch_pretrained_bert.optimization import BertAdam
 from pytorch_pretrained_bert.tokenization import (BasicTokenizer,
                                                   BertTokenizer,
                                                   whitespace_tokenize)
+from tensorboardX import SummaryWriter
 from torch.optim import Adam
 from torch.utils.data import RandomSampler, SequentialSampler, TensorDataset
 from tqdm import tqdm, trange
@@ -29,7 +30,7 @@ from utils import (WindowMean, bundle_part_to_batch,
                    judge_question_type, warmup_linear)
 
 
-def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient_accumulation_steps, lr1, lr2, alpha):
+def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient_accumulation_steps, lr1, lr2, alpha, expname):
     '''Train Sys1 and Sys2 models.
     
     Train models by task #1(tensors) and task #2(bundle). 
@@ -77,6 +78,7 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
         model2.train()
         warmed = False # warmup for jointly training
 
+    writer = SummaryWriter(f"runs/{expname}")
     for epoch in trange(num_epoch, desc = 'Epoch'):
         ans_mean, hop_mean = WindowMean(), WindowMean()
         opt1.zero_grad()
@@ -98,6 +100,13 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
                     hop_loss, ans_loss = hop_loss.mean(), ans_loss.mean()
                     loss = ans_loss + hop_loss + alpha * final_loss
                 loss.backward()
+
+                if step % 100 == 0:
+                    writer.add_scalar('loss/total', loss, step)
+                    writer.add_scalar('loss/hop', hop_loss, step)
+                    writer.add_scalar('loss/ans', ans_loss, step)
+                    if mode == 'bundle':
+                        writer.add_scalar('loss/final', final_loss, step)
 
                 if (step + 1) % gradient_accumulation_steps == 0:
                     # modify learning rate with special warm up BERT uses. From BERT pytorch examples
@@ -135,7 +144,7 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
 
 
 def main(output_model_file = './models/bert-base-uncased.bin', load = False, mode = 'tensors', batch_size = 20, 
-            num_epoch = 1, gradient_accumulation_steps = 1, lr1 = 1e-4, lr2 = 1e-4, alpha = 0.2):
+            num_epoch = 1, gradient_accumulation_steps = 1, lr1 = 1e-4, lr2 = 1e-4, alpha = 0.2, expname=""):
     
     BERT_MODEL = 'bert-base-uncased' # bert-large is too large for ordinary GPU on task #2
     tokenizer = BertTokenizer.from_pretrained(BERT_MODEL, do_lower_case=True)
@@ -166,7 +175,7 @@ def main(output_model_file = './models/bert-base-uncased.bin', load = False, mod
     print('Start Training... on {} GPUs'.format(torch.cuda.device_count()))
     model1 = torch.nn.DataParallel(model1, device_ids = range(torch.cuda.device_count()))
     model1, model2 = train(bundles, model1=model1, device=device, mode=mode, model2=model2, # Then pass hyperparams
-        batch_size=batch_size, num_epoch=num_epoch, gradient_accumulation_steps=gradient_accumulation_steps,lr1=lr1, lr2=lr2, alpha=alpha)
+        batch_size=batch_size, num_epoch=num_epoch, gradient_accumulation_steps=gradient_accumulation_steps,lr1=lr1, lr2=lr2, alpha=alpha, expname=expname)
     
     print('Saving model to {}'.format(output_model_file))
     saved_dict = {'params1' : model1.module.state_dict()}
@@ -174,4 +183,10 @@ def main(output_model_file = './models/bert-base-uncased.bin', load = False, mod
     torch.save(saved_dict, output_model_file)
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expname", type=str, default="expname", help="Name of the experiment for logging and saving.")
+    parser.add_argument("--batch-size", type=int, default=20)
+    parser.add_argument("--load", action="store_true", default=False)
+    parser.add_argument("--mode", type=str, default="tensors")
+    args = parser.parse_args()
+    main(load=args.load, mode=args.mode, batch_size=args.batch_size, expname=args.expname)
