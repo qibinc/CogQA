@@ -236,10 +236,11 @@ def convert_question_to_samples_bundle(tokenizer, data: 'Json refined', neg = 2)
                     edges_in_bundle.append((e2i[para], e2i[x]))
                     
     assert n == len(additional_nodes) + len(context)
-    adj = torch.eye(n) * 2
+    adj = torch.eye(n)
+    # adj = torch.zeros(n, n)
     for x, y in edges_in_bundle:
         adj[x, y] = 1
-    adj /= torch.sum(adj, dim=0, keepdim=True)
+    # adj /= torch.sum(adj, dim=0, keepdim=True)
 
     _id = data['_id']
     ret = Bundle()

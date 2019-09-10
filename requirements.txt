@@ -1,4 +1,3 @@
-fire
 fuzzywuzzy
 python-Levenshtein
 pytorch-pretrained-bert
@@ -7,3 +6,4 @@ torch
 torchvision
 tqdm
 ujson
+tensorboardX

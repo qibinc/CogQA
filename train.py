@@ -5,13 +5,12 @@ import pdb
 import random
 import re
 import traceback
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from itertools import product
 
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-from data import convert_question_to_samples_bundle, homebrew_data_loader
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
 from pytorch_pretrained_bert.optimization import BertAdam
@@ -23,6 +22,7 @@ from torch.optim import Adam
 from torch.utils.data import RandomSampler, SequentialSampler, TensorDataset
 from tqdm import tqdm, trange
 
+from data import convert_question_to_samples_bundle, homebrew_data_loader
 from model import BertForMultiHopQuestionAnswering, CognitiveGNN
 from utils import (WindowMean, bundle_part_to_batch,
                    find_start_end_after_tokenized,
@@ -87,6 +87,7 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
             opt2.zero_grad()
         tqdm_obj = tqdm(dataloader, total = num_batch)
 
+        losses = defaultdict(list)
         for step, batch in enumerate(tqdm_obj):
             try:
                 if mode == 'tensors':
@@ -99,14 +100,16 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
                     hop_loss, ans_loss, final_loss = model2(batch, model1, device)
                     hop_loss, ans_loss = hop_loss.mean(), ans_loss.mean()
                     loss = ans_loss + hop_loss + alpha * final_loss
+                    losses['final'].append(final_loss.item())
+                losses['total'].append(loss.item())
+                losses['hop'].append(hop_loss.item())
+                losses['ans'].append(ans_loss.item())
                 loss.backward()
 
-                if step % 100 == 0:
-                    writer.add_scalar('loss/total', loss, step)
-                    writer.add_scalar('loss/hop', hop_loss, step)
-                    writer.add_scalar('loss/ans', ans_loss, step)
-                    if mode == 'bundle':
-                        writer.add_scalar('loss/final', final_loss, step)
+                if (step + 1) % 100 == 0:
+                    for k in losses:
+                        writer.add_scalar(f'loss/{k}', np.mean(losses[k]), step)
+                    losses.clear()
 
                 if (step + 1) % gradient_accumulation_steps == 0:
                     # modify learning rate with special warm up BERT uses. From BERT pytorch examples
@@ -132,7 +135,7 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
                         tqdm_obj.set_description('ans_loss: {:.2f}, hop_loss: {:.2f}'.format(
                             ans_mean.update(ans_loss.item()), hop_mean.update(hop_loss.item())))
                     if step % 1000 == 0:
-                        output_model_file = './models/bert-base-uncased.bin.tmp'
+                        output_model_file = f'./models/bert-base-uncased-{expname}.bin.tmp'
                         saved_dict = {'params1' : model1.module.state_dict()}
                         saved_dict['params2'] = model2.state_dict()
                         torch.save(saved_dict, output_model_file)
@@ -151,7 +154,7 @@ def main(output_model_file = './models/bert-base-uncased.bin', load = False, mod
     with open('./hotpot_train_v1.1_refined.json' ,'r') as fin:
         dataset = json.load(fin)
     bundles = []
-    for data in tqdm(dataset):
+    for data in tqdm(dataset[:10000]):
         try:
             bundles.append(convert_question_to_samples_bundle(tokenizer, data))
         except ValueError as err:
@@ -164,19 +167,22 @@ def main(output_model_file = './models/bert-base-uncased.bin', load = False, mod
         print('Loading model from {}'.format(output_model_file))
         model_state_dict = torch.load(output_model_file)
         model1 = BertForMultiHopQuestionAnswering.from_pretrained(BERT_MODEL, state_dict=model_state_dict['params1'])
-        model2 = CognitiveGNN(model1.config.hidden_size)
+        model2 = CognitiveGNN(model1.config.hidden_size, model1.config)
         model2.load_state_dict(model_state_dict['params2'])
+        from model import XAttn
+        model2.gcn = XAttn(model1.config.hidden_size, model1.config)
 
     else:
         model1 = BertForMultiHopQuestionAnswering.from_pretrained(BERT_MODEL,
                 cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(-1))
-        model2 = CognitiveGNN(model1.config.hidden_size)
+        model2 = CognitiveGNN(model1.config.hidden_size, model1.config)
 
     print('Start Training... on {} GPUs'.format(torch.cuda.device_count()))
     model1 = torch.nn.DataParallel(model1, device_ids = range(torch.cuda.device_count()))
     model1, model2 = train(bundles, model1=model1, device=device, mode=mode, model2=model2, # Then pass hyperparams
         batch_size=batch_size, num_epoch=num_epoch, gradient_accumulation_steps=gradient_accumulation_steps,lr1=lr1, lr2=lr2, alpha=alpha, expname=expname)
     
+    output_model_file = f'./models/bert-base-uncased-{expname}.bin'
     print('Saving model to {}'.format(output_model_file))
     saved_dict = {'params1' : model1.module.state_dict()}
     saved_dict['params2'] = model2.state_dict()

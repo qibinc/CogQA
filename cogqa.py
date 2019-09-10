@@ -1,20 +1,30 @@
-import re
-import json
-from pytorch_pretrained_bert.tokenization import whitespace_tokenize, BasicTokenizer, BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
-from model import BertForMultiHopQuestionAnswering, CognitiveGNN
-from torch.optim import Adam
-from tqdm import tqdm, trange
-from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
-import pdb
-import torch
-from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
-from pytorch_pretrained_bert.optimization import BertAdam
-from utils import warmup_linear, find_start_end_after_tokenized, find_start_end_before_tokenized, bundle_part_to_batch, judge_question_type, fuzzy_retrieve, WindowMean, get_context_fullwiki
-import random
-from collections import namedtuple
-import numpy as np
+import argparse
 import copy
+import json
+import pdb
+import random
+import re
+from collections import namedtuple
+
+import numpy as np
+import torch
+from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
+from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
+from pytorch_pretrained_bert.optimization import BertAdam
+from pytorch_pretrained_bert.tokenization import (BasicTokenizer,
+                                                  BertTokenizer,
+                                                  whitespace_tokenize)
+from torch.optim import Adam
+from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
+                              TensorDataset)
+from tqdm import tqdm, trange
+
+from model import BertForMultiHopQuestionAnswering, CognitiveGNN
+from utils import (WindowMean, bundle_part_to_batch,
+                   find_start_end_after_tokenized,
+                   find_start_end_before_tokenized, fuzzy_retrieve,
+                   get_context_fullwiki, judge_question_type, warmup_linear)
+
 # from line_profiler import LineProfiler
 
 def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', model1, model2, device, setting:'distractor / fullwiki' = 'fullwiki', max_new_nodes = 5):
@@ -179,6 +189,10 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
         ans_ret = 'yes' if question_type == 1 else i2e[0]
         return [(i2e[0], 0)], ans_ret, [], []
     # GCN || CompareNets
+    seq_len = np.max([x.shape[0] for x in semantics])
+    for idx in range(len(semantics)):
+        if semantics[idx].shape[0] < seq_len:
+            semantics[idx] = torch.cat((semantics[idx], torch.zeros(seq_len-semantics[idx].shape[0], semantics[idx].shape[1]).to(device)), dim=0)
     semantics = torch.stack(semantics)
     if question_type == 0:
         adj = torch.eye(n, device = device) * 2
@@ -186,7 +200,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
             for title, sen_num in prev[x]:
                 adj[e2i[title], x] = 1
         adj /= torch.sum(adj, dim=0, keepdim=True)
-        pred = model2.gcn(adj, semantics)
+        pred = model2.gcn(adj, semantics, None)
         for x in range(n):
             if x not in ans_nodes:
                 pred[x] -= 10000.
@@ -197,7 +211,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
         for title, sen_num in gold_ret:
             gold_num[e2i[title]] += 1
         x, y = gold_num.topk(2)[1].tolist()
-        diff_sem = semantics[x] - semantics[y]
+        diff_sem = semantics[x][0] - semantics[y][0]
         classifier = model2.both_net if question_type == 1 else model2.select_net
         pred = int(torch.sigmoid(classifier(diff_sem)).item() > 0.5)
         ans_ret = ['no', 'yes'][pred] if question_type == 1 else [i2e[x], i2e[y]][pred] 
@@ -221,7 +235,9 @@ def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.
     print('Loading model from {}'.format(model_file))
     model_state_dict = torch.load(model_file)
     model1 = BertForMultiHopQuestionAnswering.from_pretrained(BERT_MODEL, state_dict=model_state_dict['params1'])
-    model2 = CognitiveGNN(model1.config.hidden_size)
+    model2 = CognitiveGNN(model1.config.hidden_size, model1.config)
+    from model import XAttn
+    model2.gcn = XAttn(model1.config.hidden_size, model1.config)
     model2.load_state_dict(model_state_dict['params2'])
     sp, answer, graphs = {}, {}, {}
     print('Start Training... on {} GPUs'.format(torch.cuda.device_count()))
@@ -239,6 +255,9 @@ def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.
     with open(pred_file, 'w') as fout:
         json.dump({'answer': answer, 'sp': sp, 'graphs': graphs}, fout)
     
-import fire
 if __name__ == "__main__":
-    fire.Fire(main)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-file", type=str, default="./models/bert-base-uncased.bin")
+    parser.add_argument("--data-file", type=str, default="hotpot_dev_fullwiki_v1_merge.json")
+    args = parser.parse_args()
+    main(model_file=args.model_file, data_file=args.data_file)
