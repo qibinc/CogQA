@@ -104,6 +104,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
     
     gold_ret, ans_nodes = set([]), set([])
     allow_limit = [0, 0]
+    input_masks = []
     while len(queue) > 0:
         # visit all nodes in the frontier queue
         ids, segment_ids, input_mask, sep_positions, tokenized_alls, B_starts = construct_infer_batch(queue)
@@ -111,6 +112,8 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
             None, None, None, None, 
             B_starts, allow_limit)  
         new_queue = []
+        assert len(queue) == input_mask.shape[0]
+        input_masks.append(input_mask)
         for i, x in enumerate(queue):
             semantics[x] = semantics_preds[i]
             # for hop spans
@@ -193,14 +196,22 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
     for idx in range(len(semantics)):
         if semantics[idx].shape[0] < seq_len:
             semantics[idx] = torch.cat((semantics[idx], torch.zeros(seq_len-semantics[idx].shape[0], semantics[idx].shape[1]).to(device)), dim=0)
+    seq_len = np.max([x.shape[1] for x in input_masks])
+    for idx in range(len(input_masks)):
+        input_masks[idx] = torch.cat((input_masks[idx], torch.zeros(input_masks[idx].shape[0], seq_len - input_masks[idx].shape[1], dtype=torch.long).to(device)), dim=1)
+
     semantics = torch.stack(semantics)
+    input_masks = torch.cat(input_masks)
+    input_masks = input_masks.unsqueeze(1).unsqueeze(2)
+    input_masks = (1.0 - input_masks) * -10000.0
+    input_masks = input_masks.to(dtype=torch.float32) # fp16 compatibility
     if question_type == 0:
         adj = torch.eye(n, device = device) * 2
         for x in range(n):
             for title, sen_num in prev[x]:
                 adj[e2i[title], x] = 1
         adj /= torch.sum(adj, dim=0, keepdim=True)
-        pred = model2.gcn(adj, semantics, None)
+        pred = model2.gcn(adj, semantics, input_masks)
         for x in range(n):
             if x not in ans_nodes:
                 pred[x] -= 10000.
