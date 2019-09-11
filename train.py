@@ -64,10 +64,7 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
     num_batch, dataloader = homebrew_data_loader(bundles, mode = mode, batch_size=batch_size)
     num_steps = num_batch * num_epoch
     global_step = 0
-    if mode == 'bundle':
-        opt1 = BertAdam(optimizer_grouped_parameters, lr = lr1, t_total=num_steps)
-    else:
-        opt1 = BertAdam(optimizer_grouped_parameters, lr = lr1, warmup = 0.1, t_total=num_steps)
+    opt1 = BertAdam(optimizer_grouped_parameters, lr = lr1, warmup = 0.1, t_total=num_steps)
     model1.to(device)
     model1.train()
 
@@ -106,16 +103,12 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
                 losses['ans'].append(ans_loss.item())
                 loss.backward()
 
-                if (step + 1) % 100 == 0:
-                    for k in losses:
-                        writer.add_scalar(f'loss/{k}', np.mean(losses[k]), step)
-                    losses.clear()
-
                 if (step + 1) % gradient_accumulation_steps == 0:
                     # modify learning rate with special warm up BERT uses. From BERT pytorch examples
-                    lr_this_step = lr1 * warmup_linear(global_step/num_steps, warmup = 0.1)
-                    for param_group in opt1.param_groups:
-                        param_group['lr'] = lr_this_step
+                    # lr_this_step = lr1 * warmup_linear(global_step/num_steps, warmup = 0.1)
+                    lr_this_step = opt1.get_lr()
+                    assert len(set(lr_this_step)) == 1
+                    lr_this_step = lr1 * lr_this_step[0]
                     global_step += 1
                     if mode == 'bundle':
                         opt2.step()
@@ -139,6 +132,13 @@ def train(bundles, model1, device, mode, model2, batch_size, num_epoch, gradient
                         saved_dict = {'params1' : model1.module.state_dict()}
                         saved_dict['params2'] = model2.state_dict()
                         torch.save(saved_dict, output_model_file)
+
+                    if (step + 1) % 100 == 0:
+                        for k in losses:
+                            writer.add_scalar(f'loss/{k}', np.mean(losses[k]), step)
+                        losses.clear()
+                        writer.add_scalar(f'lr', lr_this_step, step)
+
             except Exception as err:
                 traceback.print_exc()
                 if mode == 'bundle':   
@@ -194,5 +194,6 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--load", action="store_true", default=False)
     parser.add_argument("--mode", type=str, default="tensors")
+    parser.add_argument("--lr1", type=float, default=1e-4)
     args = parser.parse_args()
-    main(load=args.load, mode=args.mode, batch_size=args.batch_size, expname=args.expname)
+    main(load=args.load, mode=args.mode, batch_size=args.batch_size, expname=args.expname, lr1=args.lr1)

@@ -199,10 +199,10 @@ def glorot(tensor):
 
 class MPLayer(nn.Module):
 
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, config):
         super().__init__()
         self.W = nn.Parameter(torch.Tensor(hidden_size, hidden_size))
-        # layer = BertXLayer(config)
+        self.xlayer = BertXLayer(config)
     
     def reset_parameters(self):
         glorot(self.W)
@@ -216,31 +216,54 @@ class MPLayer(nn.Module):
         edge_list = adj.nonzero()
         n = semantics.shape[0]
         assert adj.shape[0] == n
-        h = torch.mm(semantics[:, 0], self.W)
-        h_x = h[edge_list[:, 0]]
-        # h_y = h[edge_list[:, 1], 0]
+        _, h = self.xlayer(semantics[edge_list[:, 0]], attention_masks[edge_list[:, 0]],
+                           semantics[edge_list[:, 1]], attention_masks[edge_list[:, 1]])
+        h = h[:, 0]
 
         # Message passing
-        # index = edge_list[:, 1].long()
-        # src = torch.ones_like(index).float()
-        # h_num = torch.zeros(n, device=src.device)
-        # scatter_add(src, index, out=h_num)
-
         index = edge_list[:, 1].long()
-        src = h_x
-        h_sum = torch.zeros_like(h)
+        src = h
+        h_sum = torch.zeros_like(semantics[:, 0])
         scatter_mean(src, index, out=h_sum, dim=0)
 
         # h_sum /= h_num
 
         return gelu(h_sum)
 
+    # def forward(self, adj, semantics, attention_masks):
+    #     '''
+    #     adj: (n, n)
+    #     semantics: (n, seq_len, hidden_size)
+    #     attention_mask: (n, seq_len, hidden_size)
+    #     '''
+    #     edge_list = adj.nonzero()
+    #     n = semantics.shape[0]
+    #     assert adj.shape[0] == n
+    #     h = torch.mm(semantics[:, 0], self.W)
+    #     h_x = h[edge_list[:, 0]]
+    #     # h_y = h[edge_list[:, 1], 0]
+
+    #     # Message passing
+    #     # index = edge_list[:, 1].long()
+    #     # src = torch.ones_like(index).float()
+    #     # h_num = torch.zeros(n, device=src.device)
+    #     # scatter_add(src, index, out=h_num)
+
+    #     index = edge_list[:, 1].long()
+    #     src = h_x
+    #     h_sum = torch.zeros_like(h)
+    #     scatter_mean(src, index, out=h_sum, dim=0)
+
+    #     # h_sum /= h_num
+
+    #     return gelu(h_sum)
+
 
 class XAttn(nn.Module):
 
     def __init__(self, input_size, config, n_layers=1):
         super(XAttn, self).__init__()
-        layer = MPLayer(input_size)
+        layer = MPLayer(input_size, config)
         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(n_layers)])
         self.predict = MLP(input_sizes=(input_size, input_size, 1))
 
@@ -537,8 +560,9 @@ class CognitiveGNN(nn.Module):
                 attention_mask = torch.cat((attention_mask, torch.zeros(zero_shape[:-1], dtype=torch.long).to(device)), dim=1)
             semantics = torch.cat((semantics, additional_semantics), dim=0)
             attention_mask = torch.cat((attention_mask, additional_attention_mask), dim=0)
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
             attention_mask = (1.0 - attention_mask) * -10000.0
-            
+            attention_mask = attention_mask.to(dtype=torch.float32) # fp16 compatibility
 
         assert semantics.size()[0] == bundle.adj.size()[0]
         assert semantics.shape[0] == attention_mask.shape[0]
