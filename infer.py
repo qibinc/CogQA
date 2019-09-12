@@ -237,7 +237,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
     ans_nodes_ret = [i2e[x] for x in ans_nodes]
     return gold_ret, ans_ret, graph_ret, ans_nodes_ret
 
-def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.bin', data_file='./data/hotpot_dev_distractor_v1.json', max_new_nodes=5):
+def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.bin', data_file='./data/hotpot_dev_distractor_v1.json', max_new_nodes=5, sys2='xattn'):
     setting = 'distractor' if data_file.find('distractor') >= 0 else 'fullwiki'
     with open(data_file, 'r') as fin:
         dataset = json.load(fin)
@@ -246,12 +246,12 @@ def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.
     print('Loading model from {}'.format(model_file))
     model_state_dict = torch.load(model_file)
     model1 = BertForMultiHopQuestionAnswering.from_pretrained(BERT_MODEL, state_dict=model_state_dict['params1'])
-    model2 = CognitiveGNN(model1.config.hidden_size, model1.config)
+    model2 = CognitiveGNN(model1.config.hidden_size, model1.config, sys2)
     from model import XAttn
     model2.gcn = XAttn(model1.config.hidden_size, model1.config)
     model2.load_state_dict(model_state_dict['params2'])
     sp, answer, graphs = {}, {}, {}
-    print('Start Training... on {} GPUs'.format(torch.cuda.device_count()))
+    print('Start inference... on {} GPUs'.format(torch.cuda.device_count()))
     model1 = torch.nn.DataParallel(model1, device_ids = range(torch.cuda.device_count()))
     model1.to(device).eval()
     model2.to(device).eval()
@@ -270,5 +270,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-file", type=str, default="./models/bert-base-uncased.bin")
     parser.add_argument("--data-file", type=str, default="data/hotpot_dev_fullwiki_v1_merge.json")
+    parser.add_argument("--sys2", type=str, default="xattn", choices=["xattn", "gcn", "mlp"])
     args = parser.parse_args()
-    main(model_file=args.model_file, data_file=args.data_file)
+    main(model_file=args.model_file, data_file=args.data_file, sys2=args.sys2)

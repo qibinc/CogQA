@@ -11,7 +11,6 @@ from itertools import product
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-from dataset import convert_question_to_samples_bundle, homebrew_data_loader
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
 from pytorch_pretrained_bert.optimization import BertAdam
@@ -23,11 +22,12 @@ from torch.optim import Adam
 from torch.utils.data import RandomSampler, SequentialSampler, TensorDataset
 from tqdm import tqdm, trange
 
+from dataset import convert_question_to_samples_bundle, homebrew_data_loader
 from model import BertForMultiHopQuestionAnswering, CognitiveGNN
-from utils import (bundle_part_to_batch,
-                   find_start_end_after_tokenized,
+from utils import (bundle_part_to_batch, find_start_end_after_tokenized,
                    find_start_end_before_tokenized, fuzz, fuzzy_retrieve,
                    judge_question_type, warmup_linear)
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -44,6 +44,8 @@ def parse_args():
     parser.add_argument("--tune", action="store_true", default=False)
     # bert-large is too large for ordinary GPU on task #2
     parser.add_argument("--bert-model", type=str, default="bert-base-uncased")
+    parser.add_argument("--xattn-layers", type=int, default=1)
+    parser.add_argument("--sys2", type=str, default="xattn", choices=["xattn", "gcn", "mlp"])
     parser.add_argument(
         "--expname",
         type=str,
@@ -62,7 +64,8 @@ def save_model(model1, model2, save_path):
     torch.save(state_dict, save_path)
 
 def train(
-    bundles,
+    train_bundles,
+    valid_bundles,
     model1,
     mode,
     model2,
@@ -73,6 +76,7 @@ def train(
     lr2,
     weight_decay,
     expname,
+    bert_model,
 ):
     """Train Sys1 and Sys2 models.
     
@@ -119,7 +123,7 @@ def train(
         },
     ]
     num_batches, dataloader = homebrew_data_loader(
-        bundles, mode=mode, batch_size=batch_size
+        train_bundles, mode=mode, batch_size=batch_size
     )
     num_steps = num_batches * num_epochs // gradient_accumulation_steps
 
@@ -179,7 +183,7 @@ def train(
 
                 if (step + 1) % 1000 == 0:
                     save_path = (
-                        f"./saved/bert-base-uncased-{expname}.bin.tmp"
+                        f"./saved/{bert_model}-{expname}.bin.tmp"
                     )
                     save_model(model1, model2, save_path)
 
@@ -200,16 +204,24 @@ if __name__ == "__main__":
 
     tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=True)
     with open("./data/hotpot_train_v1.1_refined.json", "r") as fin:
-        dataset = json.load(fin)
-    bundles = []
+        train_data = json.load(fin)
+    with open("./data/hotpot_dev_distractor_v1_refined.json", "r") as fin:
+        valid_data = json.load(fin)
+    train_bundles = []
     # Use a portion of dataset for tuning
     if args.tune:
-        dataset = dataset[:10000]
-    for data in tqdm(dataset):
+        train_data = train_data[:10000]
+    for data in tqdm(train_data):
         try:
-            bundles.append(convert_question_to_samples_bundle(tokenizer, data))
+            train_bundles.append(convert_question_to_samples_bundle(tokenizer, data))
         except ValueError as err:
             pass
+    valid_bundles = []
+    # for data in tqdm(valid_data):
+    #     try:
+    #         valid_bundles.append(convert_question_to_samples_bundle(tokenizer, data))
+    #     except ValueError as err:
+    #         pass
 
     if not args.load:
         # Task #1
@@ -217,7 +229,7 @@ if __name__ == "__main__":
             args.bert_model,
             cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / "distributed_{}".format(-1),
         )
-        model2 = CognitiveGNN(model1.config.hidden_size, model1.config)
+        model2 = CognitiveGNN(model1.config.hidden_size, model1.config, args.sys2)
     else:
         # Task #2
         print("Loading model from {}".format(args.load_path))
@@ -225,14 +237,20 @@ if __name__ == "__main__":
         model1 = BertForMultiHopQuestionAnswering.from_pretrained(
             args.bert_model, state_dict=model_state_dict["params1"]
         )
-        model2 = CognitiveGNN(model1.config.hidden_size, model1.config)
+        hidden_size = model1.config.hidden_size
+        model2 = CognitiveGNN(hidden_size, model1.config, args.sys2)
         model2.load_state_dict(model_state_dict["params2"])
-        from model import XAttn
-        model2.gcn = XAttn(model1.config.hidden_size, model1.config)
+        if args.sys2 == "xattn":
+            from model import XAttn
+            model2.gcn = XAttn(model1.config.hidden_size, model1.config, n_layers=args.xattn_layers)
+        elif args.sys2 == "mlp":
+            from layers import MLP
+            model2.gcn = MLP((hidden_size, hidden_size, 1))
 
     model1 = torch.nn.DataParallel(model1, device_ids=range(torch.cuda.device_count()))
     model1, model2 = train(
-        bundles,
+        train_bundles,
+        valid_bundles,
         model1=model1,
         mode=args.mode,
         model2=model2,
@@ -243,7 +261,8 @@ if __name__ == "__main__":
         lr2=args.lr2,
         weight_decay=args.weight_decay,
         expname=args.expname,
+        bert_model=args.bert_model
     )
 
-    save_path = f"./saved/bert-base-uncased-{args.expname}.bin"
+    save_path = f"./saved/{args.bert_model}-{args.expname}.bin"
     save_model(model1, model2, save_path)

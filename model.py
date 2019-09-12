@@ -267,11 +267,12 @@ class BertForMultiHopQuestionAnswering(PreTrainedBertModel):
 
 
 class CognitiveGNN(nn.Module):
-    def __init__(self, hidden_size, config):
+    def __init__(self, hidden_size, config, module_type):
         super(CognitiveGNN, self).__init__()
         self.gcn = GCN(hidden_size)
         self.both_net = MLP((hidden_size, hidden_size, 1))
         self.select_net = MLP((hidden_size, hidden_size, 1))
+        self.module_type = module_type
 
     def forward(self, bundle, model, device):
         batch = bundle_part_to_batch(bundle)
@@ -320,7 +321,7 @@ class CognitiveGNN(nn.Module):
             elif semantics.shape[1] < additional_semantics.shape[1]:
                 zero_shape = list(semantics.shape)
                 zero_shape[1] = additional_semantics.shape[1] - semantics.shape[1]
-                semantics = torch.cat((additional_semantics, torch.zeros(zero_shape).to(device)), dim=1)
+                semantics = torch.cat((semantics, torch.zeros(zero_shape).to(device)), dim=1)
                 attention_mask = torch.cat((attention_mask, torch.zeros(zero_shape[:-1], dtype=torch.long).to(device)), dim=1)
             semantics = torch.cat((semantics, additional_semantics), dim=0)
             attention_mask = torch.cat((attention_mask, additional_attention_mask), dim=0)
@@ -332,7 +333,14 @@ class CognitiveGNN(nn.Module):
         assert semantics.shape[0] == attention_mask.shape[0]
 
         if bundle.question_type == 0:  # Wh-
-            pred = self.gcn(bundle.adj.to(device), semantics, attention_mask)
+            if self.module_type == "mlp":
+                pred = self.gcn(semantics[:, 0]).squeeze(-1)
+            elif self.module_type == "gcn":
+                pred = self.gcn(bundle.adj.to(device), semantics[:, 0])#, attention_mask)
+            elif self.module_type == "xattn":
+                pred = self.gcn(bundle.adj.to(device), semantics, attention_mask)
+            else:
+                raise NotImplementedError
             ce = torch.nn.CrossEntropyLoss()
             final_loss = ce(
                 pred.unsqueeze(0),
