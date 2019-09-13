@@ -32,6 +32,7 @@ class XAttn(nn.Module):
     def forward(self, adj, semantics, attention_masks):
         for layer_module in self.layer:
             semantics = layer_module(adj, semantics, attention_masks)
+        # return self.predict(semantics[:, 0]).squeeze(-1)
         return self.predict(semantics).squeeze(-1)
 
 

@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--num-epochs", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--tune", action="store_true", default=False)
+    parser.add_argument("--test", action="store_true", default=False)
     # bert-large is too large for ordinary GPU on task #2
     parser.add_argument("--bert-model", type=str, default="bert-base-uncased")
     parser.add_argument("--xattn-layers", type=int, default=1)
@@ -211,6 +212,8 @@ if __name__ == "__main__":
     # Use a portion of dataset for tuning
     if args.tune:
         train_data = train_data[:10000]
+    if args.test:
+        train_data = train_data[:1000]
     for data in tqdm(train_data):
         try:
             train_bundles.append(convert_question_to_samples_bundle(tokenizer, data))
@@ -229,7 +232,7 @@ if __name__ == "__main__":
             args.bert_model,
             cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / "distributed_{}".format(-1),
         )
-        model2 = CognitiveGNN(model1.config.hidden_size, model1.config, args.sys2)
+        model2 = CognitiveGNN(model1.config.hidden_size, model1.config, 'gcn')
     else:
         # Task #2
         print("Loading model from {}".format(args.load_path))
@@ -248,6 +251,7 @@ if __name__ == "__main__":
             model2.gcn = MLP((hidden_size, hidden_size, 1))
 
     model1 = torch.nn.DataParallel(model1, device_ids=range(torch.cuda.device_count()))
+    print(model1, model2)
     model1, model2 = train(
         train_bundles,
         valid_bundles,

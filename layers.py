@@ -3,9 +3,9 @@ import math
 
 import torch
 import torch.nn as nn
-from pytorch_pretrained_bert.modeling import (BertAttention, 
-                                              BertIntermediate, 
-                                              BertModel, BertOutput
+from pytorch_pretrained_bert.modeling import (BertAttention,
+                                              BertIntermediate,
+                                              BertModel, BertOutput, BertLayerNorm
                                               )
 from pytorch_pretrained_bert.modeling import BertSelfOutput, gelu
 from torch_scatter import scatter_add, scatter_mean
@@ -192,11 +192,9 @@ class MPLayer(nn.Module):
 
     def __init__(self, hidden_size, config):
         super().__init__()
-        self.W = nn.Parameter(torch.Tensor(hidden_size, hidden_size))
         self.xlayer = BertXLayer(config)
-    
-    def reset_parameters(self):
-        glorot(self.W)
+        # self.dense = nn.Linear(hidden_size, hidden_size)
+        # self.norm = BertLayerNorm(hidden_size, eps=1e-12)
 
     def forward(self, adj, semantics, attention_masks):
         '''
@@ -213,38 +211,13 @@ class MPLayer(nn.Module):
 
         # Message passing
         index = edge_list[:, 1].long()
+        # src = self.dense(h)
         src = h
         h_sum = torch.zeros_like(semantics[:, 0])
+        # h_sum = torch.zeros_like(semantics)
+        # scatter_add(src, index, out=h_sum, dim=0)
         scatter_mean(src, index, out=h_sum, dim=0)
 
         # h_sum /= h_num
 
         return gelu(h_sum)
-
-    # def forward(self, adj, semantics, attention_masks):
-    #     '''
-    #     adj: (n, n)
-    #     semantics: (n, seq_len, hidden_size)
-    #     attention_mask: (n, seq_len, hidden_size)
-    #     '''
-    #     edge_list = adj.nonzero()
-    #     n = semantics.shape[0]
-    #     assert adj.shape[0] == n
-    #     h = torch.mm(semantics[:, 0], self.W)
-    #     h_x = h[edge_list[:, 0]]
-    #     # h_y = h[edge_list[:, 1], 0]
-
-    #     # Message passing
-    #     # index = edge_list[:, 1].long()
-    #     # src = torch.ones_like(index).float()
-    #     # h_num = torch.zeros(n, device=src.device)
-    #     # scatter_add(src, index, out=h_num)
-
-    #     index = edge_list[:, 1].long()
-    #     src = h_x
-    #     h_sum = torch.zeros_like(h)
-    #     scatter_mean(src, index, out=h_sum, dim=0)
-
-    #     # h_sum /= h_num
-
-    #     return gelu(h_sum)

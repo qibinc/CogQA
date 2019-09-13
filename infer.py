@@ -237,7 +237,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
     ans_nodes_ret = [i2e[x] for x in ans_nodes]
     return gold_ret, ans_ret, graph_ret, ans_nodes_ret
 
-def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.bin', data_file='./data/hotpot_dev_distractor_v1.json', max_new_nodes=5, sys2='xattn'):
+def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.bin', data_file='./data/hotpot_dev_distractor_v1.json', max_new_nodes=5, sys2='xattn', attn_layers=1):
     setting = 'distractor' if data_file.find('distractor') >= 0 else 'fullwiki'
     with open(data_file, 'r') as fin:
         dataset = json.load(fin)
@@ -246,9 +246,14 @@ def main(BERT_MODEL='bert-base-uncased', model_file='./models/bert-base-uncased.
     print('Loading model from {}'.format(model_file))
     model_state_dict = torch.load(model_file)
     model1 = BertForMultiHopQuestionAnswering.from_pretrained(BERT_MODEL, state_dict=model_state_dict['params1'])
-    model2 = CognitiveGNN(model1.config.hidden_size, model1.config, sys2)
-    from model import XAttn
-    model2.gcn = XAttn(model1.config.hidden_size, model1.config)
+    hidden_size = model1.config.hidden_size
+    model2 = CognitiveGNN(hidden_size, model1.config, sys2)
+    if args.sys2 == "xattn":
+        from model import XAttn
+        model2.gcn = XAttn(hidden_size, model1.config, n_layers=args.xattn_layers)
+    elif args.sys2 == "mlp":
+        from layers import MLP
+        model2.gcn = MLP((hidden_size, hidden_size, 1))
     model2.load_state_dict(model_state_dict['params2'])
     sp, answer, graphs = {}, {}, {}
     print('Start inference... on {} GPUs'.format(torch.cuda.device_count()))
@@ -271,5 +276,6 @@ if __name__ == "__main__":
     parser.add_argument("--model-file", type=str, default="./models/bert-base-uncased.bin")
     parser.add_argument("--data-file", type=str, default="data/hotpot_dev_fullwiki_v1_merge.json")
     parser.add_argument("--sys2", type=str, default="xattn", choices=["xattn", "gcn", "mlp"])
+    parser.add_argument("--xattn-layers", type=int, default=1)
     args = parser.parse_args()
     main(model_file=args.model_file, data_file=args.data_file, sys2=args.sys2)
