@@ -282,15 +282,3 @@ def bundle_part_to_batch(all_bundle, l = None, r = None):
         segment_ids[i - l, :length] = torch.tensor(all_bundle.segment_ids[i], dtype = torch.long)
         input_mask[i - l, :length] = 1
     return ids, segment_ids, input_mask, sep_positions, hop_start_weights, hop_end_weights, ans_start_weights, ans_end_weights
-
-class WindowMean:
-    def __init__(self, window_size = 50):
-        self.array = []
-        self.sum = 0
-        self.window_size = window_size
-    def update(self, x):
-        self.array.append(x)
-        self.sum += x
-        if len(self.array) > self.window_size:
-            self.sum -= self.array.pop(0)
-        return self.sum / len(self.array)

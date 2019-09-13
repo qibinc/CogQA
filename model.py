@@ -1,70 +1,39 @@
-from pytorch_pretrained_bert.modeling import (
-    BertPreTrainedModel as PreTrainedBertModel, # The name was changed in the new versions of pytorch_pretrained_bert
-    BertModel,
-    BertLayerNorm,
-    gelu,
-    BertEncoder,
-    BertPooler,
-)
-import torch
-from torch import nn
-from utils import (
-    fuzzy_find,
-    find_start_end_after_tokenized,
-    find_start_end_before_tokenized,
-    bundle_part_to_batch,
-)
-from pytorch_pretrained_bert.tokenization import (
-    whitespace_tokenize,
-    BasicTokenizer,
-    BertTokenizer,
-)
-import re
+import math
+import copy
 import pdb
+import re
+
+from torch_scatter import scatter_add, scatter_mean
+import torch
+import torch.nn as nn
+from pytorch_pretrained_bert.modeling import (BertAttention, BertEncoder,
+                                              BertIntermediate, BertLayerNorm,
+                                              BertModel,
+                                              BertOutput, BertPooler)
+from pytorch_pretrained_bert.modeling import \
+    BertPreTrainedModel as PreTrainedBertModel  # Thenized,
+from pytorch_pretrained_bert.modeling import BertSelfOutput, gelu
+from pytorch_pretrained_bert.tokenization import (BasicTokenizer,
+                                                  BertTokenizer,
+                                                  whitespace_tokenize)
+
+from layers import MPLayer, MLP, GCN
+from utils import bundle_part_to_batch, find_start_end_before_tokenized
 
 
-class MLP(nn.Module):
-    def __init__(self, input_sizes, dropout_prob=0.2, bias=False):
-        super(MLP, self).__init__()
-        self.layers = nn.ModuleList()
-        for i in range(1, len(input_sizes)):
-            self.layers.append(nn.Linear(input_sizes[i - 1], input_sizes[i], bias=bias))
-        self.norm_layers = nn.ModuleList()
-        if len(input_sizes) > 2:
-            for i in range(1, len(input_sizes) - 1):
-                self.norm_layers.append(nn.LayerNorm(input_sizes[i]))
-        self.drop_out = nn.Dropout(p=dropout_prob)
+class XAttn(nn.Module):
 
-    def forward(self, x):
-        for i, layer in enumerate(self.layers):
-            x = layer(self.drop_out(x))
-            if i < len(self.layers) - 1:
-                x = gelu(x)
-                if len(self.norm_layers):
-                    x = self.norm_layers[i](x)
-        return x
-
-
-class GCN(nn.Module):
-    def init_weights(self, module):
-        """ Initialize the weights.
-        """
-        if isinstance(module, (nn.Linear, nn.Embedding)):
-            module.weight.data.normal_(mean=0.0, std=0.05)
-
-    def __init__(self, input_size):
-        super(GCN, self).__init__()
-        self.diffusion = nn.Linear(input_size, input_size, bias=False)
-        self.retained = nn.Linear(input_size, input_size, bias=False)
+    def __init__(self, input_size, config, n_layers=1):
+        super(XAttn, self).__init__()
+        layer = MPLayer(input_size, config)
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(n_layers)])
         self.predict = MLP(input_sizes=(input_size, input_size, 1))
-        self.apply(self.init_weights)
 
-    def forward(self, A, x):
-        layer1_diffusion = A.t().mm(gelu(self.diffusion(x)))
-        x = gelu(self.retained(x) + layer1_diffusion)
-        layer2_diffusion = A.t().mm(gelu(self.diffusion(x)))
-        x = gelu(self.retained(x) + layer2_diffusion)
-        return self.predict(x).squeeze(-1)
+    def forward(self, adj, semantics, attention_masks):
+        for layer_module in self.layer:
+            semantics = layer_module(adj, semantics, attention_masks)
+        # return self.predict(semantics[:, 0]).squeeze(-1)
+        return self.predict(semantics).squeeze(-1)
 
 
 class BertEmbeddingsPlus(nn.Module):
@@ -203,7 +172,8 @@ class BertForMultiHopQuestionAnswering(PreTrainedBertModel):
         sequence_output, hidden_output = self.bert(
             input_ids, token_type_ids, attention_mask
         )
-        semantics = hidden_output[:, 0]
+        semantics = hidden_output
+        # semantics = hidden_output[:, 0]
         # Some shapes: sequence_output [batch_size, max_length, hidden_size], pooled_output [batch_size, hidden_size]
         if sep_positions is None:
             return semantics  # Only semantics, used in bundle forward
@@ -275,7 +245,7 @@ class BertForMultiHopQuestionAnswering(PreTrainedBertModel):
                         values, indices = start_logits[i, B_starts[i] :].topk(K)
                         for k, index in enumerate(indices):
                             if values[k] <= start_logits[i, 0] - allow:  # not golden
-                                if u == 1: # For ans spans
+                                if u == 1:  # For ans spans
                                     ans_start_gap[i] = start_logits[i, 0] - values[k]
                                 break
                             start = index + B_starts[i]
@@ -298,18 +268,23 @@ class BertForMultiHopQuestionAnswering(PreTrainedBertModel):
 
 
 class CognitiveGNN(nn.Module):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, config, module_type):
         super(CognitiveGNN, self).__init__()
         self.gcn = GCN(hidden_size)
         self.both_net = MLP((hidden_size, hidden_size, 1))
         self.select_net = MLP((hidden_size, hidden_size, 1))
+        self.module_type = module_type
 
     def forward(self, bundle, model, device):
         batch = bundle_part_to_batch(bundle)
         batch = tuple(t.to(device) for t in batch)
-        hop_loss, ans_loss, semantics = model(
-            *batch
-        )  # Shape of semantics: [num_para, hidden_size]
+        with torch.no_grad():
+            hop_loss, ans_loss, semantics = model(
+                *batch
+            )
+        attention_mask = batch[2]
+        # Shape of semantics: [num_para, seq_len, hidden_size]
+        # # Shape of semantics: [num_para, hidden_size]
         num_additional_nodes = len(bundle.additional_nodes)
 
         if num_additional_nodes > 0:
@@ -335,14 +310,38 @@ class CognitiveGNN(nn.Module):
                     bundle.additional_nodes[i], dtype=torch.long
                 )
                 input_mask[i, :length] = 1
-            additional_semantics = model(ids, segment_ids, input_mask)
+            additional_attention_mask = input_mask
+            with torch.no_grad():
+                additional_semantics = model(ids, segment_ids, input_mask)
 
+            if semantics.shape[1] > additional_semantics.shape[1]:
+                zero_shape = list(additional_semantics.shape)
+                zero_shape[1] = semantics.shape[1] - additional_semantics.shape[1]
+                additional_semantics = torch.cat((additional_semantics, torch.zeros(zero_shape).to(device)), dim=1)
+                additional_attention_mask = torch.cat((additional_attention_mask, torch.zeros(zero_shape[:-1], dtype=torch.long).to(device)), dim=1)
+            elif semantics.shape[1] < additional_semantics.shape[1]:
+                zero_shape = list(semantics.shape)
+                zero_shape[1] = additional_semantics.shape[1] - semantics.shape[1]
+                semantics = torch.cat((semantics, torch.zeros(zero_shape).to(device)), dim=1)
+                attention_mask = torch.cat((attention_mask, torch.zeros(zero_shape[:-1], dtype=torch.long).to(device)), dim=1)
             semantics = torch.cat((semantics, additional_semantics), dim=0)
+            attention_mask = torch.cat((attention_mask, additional_attention_mask), dim=0)
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            attention_mask = (1.0 - attention_mask) * -10000.0
+            attention_mask = attention_mask.to(dtype=torch.float32) # fp16 compatibility
 
         assert semantics.size()[0] == bundle.adj.size()[0]
+        assert semantics.shape[0] == attention_mask.shape[0]
 
         if bundle.question_type == 0:  # Wh-
-            pred = self.gcn(bundle.adj.to(device), semantics)
+            if self.module_type == "mlp":
+                pred = self.gcn(semantics[:, 0]).squeeze(-1)
+            elif self.module_type == "gcn":
+                pred = self.gcn(bundle.adj.to(device), semantics[:, 0])#, attention_mask)
+            elif self.module_type == "xattn":
+                pred = self.gcn(bundle.adj.to(device), semantics, attention_mask)
+            else:
+                raise NotImplementedError
             ce = torch.nn.CrossEntropyLoss()
             final_loss = ce(
                 pred.unsqueeze(0),
@@ -351,23 +350,9 @@ class CognitiveGNN(nn.Module):
         else:
             x, y, ans = bundle.answer_id
             ans = torch.tensor(ans, dtype=torch.float, device=device)
-            diff_sem = semantics[x] - semantics[y]
+            diff_sem = semantics[x][0] - semantics[y][0]
             classifier = self.both_net if bundle.question_type == 1 else self.select_net
             final_loss = 0.2 * torch.nn.functional.binary_cross_entropy_with_logits(
                 classifier(diff_sem).squeeze(-1), ans.to(device)
             )
         return hop_loss, ans_loss, final_loss
-
-
-if __name__ == "__main__":
-    BERT_MODEL = "bert-base-uncased"
-    tokenizer = BertTokenizer.from_pretrained(BERT_MODEL, do_lower_case=True)
-    orig_text = "".join(
-        [
-            "Theatre Centre is a UK-based theatre company touring new plays for young audiences aged 4 to 18, founded in 1953 by Brian Way, the company has developed plays by writers including which British writer, dub poet and Rastafarian?",
-            " It is the largest urban not-for-profit theatre company in the country and the largest in Western Canada, with productions taking place at the 650-seat Stanley Industrial Alliance Stage, the 440-seat Granville Island Stage, the 250-seat Goldcorp Stage at the BMO Theatre Centre, and on tour around the province.",
-        ]
-    )
-    tokenized_text = tokenizer.tokenize(orig_text)
-    print(len(tokenized_text))
-
