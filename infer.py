@@ -51,6 +51,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
     prev = [[] for i in range(n)] # elements: (title, sen_num)
     queue = range(n) 
     semantics = [None] * n
+    input_masks = [None] * n
 
     tokenized_question = ['[CLS]'] + tokenizer.tokenize(data['question']) + ['[SEP]']
 
@@ -104,7 +105,6 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
     
     gold_ret, ans_nodes = set([]), set([])
     allow_limit = [0, 0]
-    input_masks = []
     while len(queue) > 0:
         # visit all nodes in the frontier queue
         ids, segment_ids, input_mask, sep_positions, tokenized_alls, B_starts = construct_infer_batch(queue)
@@ -113,8 +113,8 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
             B_starts, allow_limit)  
         new_queue = []
         assert len(queue) == input_mask.shape[0]
-        input_masks.append(input_mask)
         for i, x in enumerate(queue):
+            input_masks[x] = input_mask[i]
             semantics[x] = semantics_preds[i]
             # for hop spans
             for k in range(hop_preds.size()[1]):
@@ -139,6 +139,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
                             context[matched] = context_new
                             prev.append([])
                             semantics.append(None)
+                            input_masks.append(None)
                             e2i[matched] = n
                             i2e.append(matched)
                             n += 1
@@ -175,6 +176,7 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
                     ans_nodes.add(n)
                     prev.append([(i2e[x], j)])
                     semantics.append(None)
+                    input_masks.append(None)
                     n += 1
         if len(new_queue) == 0 and len(ans_nodes) == 0 and allow_limit[1] < 0.1: # must find one answer
             # ``allow'' is an offset of negative threshold. 
@@ -196,12 +198,12 @@ def cognitive_graph_propagate(tokenizer, data: 'Json eval(Context as pool)', mod
     for idx in range(len(semantics)):
         if semantics[idx].shape[0] < seq_len:
             semantics[idx] = torch.cat((semantics[idx], torch.zeros(seq_len-semantics[idx].shape[0], semantics[idx].shape[1]).to(device)), dim=0)
-    seq_len = np.max([x.shape[1] for x in input_masks])
+    seq_len = np.max([x.shape[0] for x in input_masks])
     for idx in range(len(input_masks)):
-        input_masks[idx] = torch.cat((input_masks[idx], torch.zeros(input_masks[idx].shape[0], seq_len - input_masks[idx].shape[1], dtype=torch.long).to(device)), dim=1)
+        input_masks[idx] = torch.cat((input_masks[idx], torch.zeros(seq_len-input_masks[idx].shape[0], dtype=torch.long).to(device)), dim=0)
 
     semantics = torch.stack(semantics)
-    input_masks = torch.cat(input_masks)
+    input_masks = torch.stack(input_masks)
     input_masks = input_masks.unsqueeze(1).unsqueeze(2)
     input_masks = (1.0 - input_masks) * -10000.0
     input_masks = input_masks.to(dtype=torch.float32) # fp16 compatibility
