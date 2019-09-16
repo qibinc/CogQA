@@ -5,10 +5,11 @@ import torch
 import torch.nn as nn
 from pytorch_pretrained_bert.modeling import (BertAttention,
                                               BertIntermediate,
-                                              BertModel, BertOutput, BertLayerNorm
+                                              BertModel, BertOutput, BertLayerNorm,
+                                              BertLayer
                                               )
 from pytorch_pretrained_bert.modeling import BertSelfOutput, gelu
-from torch_scatter import scatter_add, scatter_mean
+# from torch_scatter import scatter_add, scatter_mean
 
 
 class BertOutAttention(nn.Module):
@@ -192,7 +193,9 @@ class MPLayer(nn.Module):
 
     def __init__(self, hidden_size, config):
         super().__init__()
-        self.xlayer = BertXLayer(config)
+        self.layer1 = BertLayer(config)
+        self.layer2 = BertLayer(config)
+        self.xlayer = BertLayer(config)
         # self.dense = nn.Linear(hidden_size, hidden_size)
         # self.norm = BertLayerNorm(hidden_size, eps=1e-12)
 
@@ -202,22 +205,41 @@ class MPLayer(nn.Module):
         semantics: (n, seq_len, hidden_size)
         attention_mask: (n, seq_len, hidden_size)
         '''
-        edge_list = adj.nonzero()
         n = semantics.shape[0]
         assert adj.shape[0] == n
-        _, h = self.xlayer(semantics[edge_list[:, 0]], attention_masks[edge_list[:, 0]],
-                           semantics[edge_list[:, 1]], attention_masks[edge_list[:, 1]])
-        h = h[:, 0]
 
-        # Message passing
-        index = edge_list[:, 1].long()
-        # src = self.dense(h)
-        src = h
-        h_sum = torch.zeros_like(semantics[:, 0])
-        # h_sum = torch.zeros_like(semantics)
-        # scatter_add(src, index, out=h_sum, dim=0)
-        scatter_mean(src, index, out=h_sum, dim=0)
+        semantics = self.layer1(semantics, attention_masks)
+        # semantics = self.layer2(semantics, attention_masks)
 
-        # h_sum /= h_num
+        attention_masks = torch.zeros(1, 1, 1, semantics.shape[0]).to(semantics.device)
 
-        return gelu(h_sum)
+        semantics = self.xlayer(semantics[:, 0].unsqueeze(0), attention_masks)
+        semantics = semantics.squeeze()
+
+        return semantics
+
+    # def forward(self, adj, semantics, attention_masks):
+    #     '''
+    #     adj: (n, n)
+    #     semantics: (n, seq_len, hidden_size)
+    #     attention_mask: (n, seq_len, hidden_size)
+    #     '''
+    #     edge_list = adj.nonzero()
+    #     n = semantics.shape[0]
+    #     assert adj.shape[0] == n
+    #     _, h = self.xlayer(semantics[edge_list[:, 0]], attention_masks[edge_list[:, 0]],
+    #                        semantics[edge_list[:, 1]], attention_masks[edge_list[:, 1]])
+    #     h = h[:, 0]
+
+    #     # Message passing
+    #     index = edge_list[:, 1].long()
+    #     # src = self.dense(h)
+    #     src = h
+    #     h_sum = torch.zeros_like(semantics[:, 0])
+    #     # h_sum = torch.zeros_like(semantics)
+    #     # scatter_add(src, index, out=h_sum, dim=0)
+    #     scatter_mean(src, index, out=h_sum, dim=0)
+
+    #     # h_sum /= h_num
+
+    #     return gelu(h_sum)

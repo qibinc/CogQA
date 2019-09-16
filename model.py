@@ -3,7 +3,6 @@ import copy
 import pdb
 import re
 
-from torch_scatter import scatter_add, scatter_mean
 import torch
 import torch.nn as nn
 from pytorch_pretrained_bert.modeling import (BertAttention, BertEncoder,
